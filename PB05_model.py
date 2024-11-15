@@ -14,13 +14,14 @@ class WalkerCirculationModel:
                  Ms0=3643, Mq0=3096, RH0=0.82, T0_ps=29, Ts0=30.2, 
                  P0=148, S_clr0=203, R_clr0=138, 
                  gamma_Ts_S=-6.28, gamma_q_S=1.64, gamma_T_S=1.51, 
-                 gamma_Ts_R=-5.99, gamma_q_R=1.08, gamma_T_R=2.9):
+                 gamma_Ts_R=-5.99, gamma_q_R=1.08, gamma_T_R=2.9,
+                 epsilon_R=0.5):
     
         # Basic parameters
         self.y0 = y0 # Initial conditions
         self.n = n # Number of spatial points
         self.A = A # Domain width (m)
-        self.C_o = mld*1e3*4184/Cp # Ocean mixed layer heat capacity (kg m-2), weird unit used to account for T being in energy units
+        self.C_o = mld*const.rhow*const.cpw/Cp # Ocean mixed layer heat capacity (kg m-2), weird unit used to account for T being in energy units
         self.delta_p_T = delta_p_T # Tropospheric pressure depth (Pa)
         self.c_q = c_q # Bulk constant for evaporation (kg m^-2 s^-1)
         self.tau_c = tau_c # Convective adjustment timescale
@@ -64,7 +65,9 @@ class WalkerCirculationModel:
         self.r_hr = r_hr # High-cloud atm radiative heating feedback, dimensionless, default = 0.17
         self.r_hs = r_hs # High-cloud surface radiative heating feedback, dimensionless, default = 0.17
         self.r_l = r_l/Cp   # Low-cloud radiative heating feedback (W m^-2 K^-1 --> W m^-2 J^-1 kg)
-
+        self.epsilon_R = epsilon_R # atmospheric fraction of low cloud cooling
+        self.epsilon_S = 1-epsilon_R # surface fraction of low cloud cooling
+        
         if self.y0==None:
             # Set initial conditions
             T0 = np.zeros(self.n) 
@@ -94,36 +97,36 @@ class WalkerCirculationModel:
 
 
     def saturation_specific_humidity(self, T):
-        # results indistinguishable if I use metpy's implementation
+        # results indistinguishable if I use metpy's implementation and PB05 do not specify their formulation
         [es,qs,rs,L] = get_saturation_thermodynamics(T,1e5,thermo_type='simple')
         return qs # units: kg/kg 
 
 
     def precipitation(self, q, T):
-        return np.maximum((self.delta_p_T / 9.81) * (q - T) / self.tau_c + self.P_0, 0)
+        return np.maximum((self.delta_p_T / const.g) * (q - T) / self.tau_c + self.P_0, 0)
 
 
     def F_lowcloud(self, T, T_s, P):
-        a_lts = 0.381
-        LTS = (a_lts*T-T_s)
+        LTS = (self.a_LTS*T-T_s)
         return (1-np.heaviside(P, 0))*self.r_l*LTS
         
     
     def R(self, T, q, T_s, P):
         R_clr = self.R_clr0 + self.gamma_T_R * T + self.gamma_q_R * q + self.gamma_Ts_R * T_s
-        R_cld = -self.r_hr * P  + 0.5 * self.F_lowcloud(T, T_s, P) # High cloud effect + Low cloud effect
+        R_cld = -self.r_hr * P  + self.epsilon_R * self.F_lowcloud(T, T_s, P) # High cloud effect + Low cloud effect
         return R_clr + R_cld + self.delta_R
 
 
     def S(self, T, q, T_s, P, x):
         S_clr = self.S_clr0 + self.gamma_T_S * T + self.gamma_q_S * q + self.gamma_Ts_S * T_s
-        S_cld = -self.r_hs * P  - 0.5 * self.F_lowcloud(T, T_s, P)  # High cloud effect + Low cloud effect
+        S_cld = -self.r_hs * P  - self.epsilon_S * self.F_lowcloud(T, T_s, P)  # High cloud effect + Low cloud effect
         S_ocn = 10 - self.delta_S * x / self.A
         return S_clr + S_cld + S_ocn
 
 
     def get_dTdt(self, P, R, x):
-        return np.trapezoid(P-R, x) * 9.81 / (self.A * self.delta_p_T * self.a_hat)
+        return np.trapezoid(P-R, x) * const.g / (self.A * self.delta_p_T * self.a_hat)
+
 
 
     def get_dSSTdt(self, T, T_s, q, P, u):
@@ -136,13 +139,13 @@ class WalkerCirculationModel:
         E = self.evaporation(T, T_s, q, P, u)
         M_q = self.M_q(q)
         dqdx = np.gradient(q, self.dx)
-        return ( 9.81 / self.delta_p_T / self.b_hat ) * ( (E - P) + (M_q * (omega / 9.81)) - (self.delta_p_T / 9.81) * self.D_q * u * dqdx )
+        return ( const.g / self.delta_p_T / self.b_hat ) * ( (E - P) + (M_q * (omega / const.g)) - (self.delta_p_T / const.g) * self.D_q * u * dqdx )
 
     
     def get_omega(self, P, R, T, x, q):
         M_s = self.M_s(T, q)
         dTdt = self.get_dTdt(P, R, x)
-        return (P - R - self.a_hat * (self.delta_p_T / 9.81) * dTdt) * (9.81 / M_s) # Gives units of Pa/s, as [T]=J/kg
+        return (P - R - self.a_hat * (self.delta_p_T / const.g) * dTdt) * (const.g / M_s) # Gives units of Pa/s, as [T]=J/kg
 
     
     def model_equations(self, t, y):
